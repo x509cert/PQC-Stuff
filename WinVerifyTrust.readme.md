@@ -1,4 +1,4 @@
-# pqc-cert-harness
+# WinVerifyTrust() pqc-cert-harness
 
 A small Windows test harness in C that generates self-signed **RSA** and
 **ML-DSA** (FIPS 204) certificates and validates each one two ways:
