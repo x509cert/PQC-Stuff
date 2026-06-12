@@ -172,7 +172,7 @@ Everything lives in a single file, `pqc_cert_harness.c`:
 
 ## License
 
-Add your preferred license here (e.g. MIT).
+See LICENSE.MD
 
 ## Disclaimer
 
