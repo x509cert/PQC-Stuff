@@ -31,7 +31,7 @@
  *     time -- if key finalize returns NTE_NOT_SUPPORTED on an old-SDK build,
  *     the parameter-set literal is the first thing to check against your SDK.
  *
- * Build (x64 Native Tools / Developer Command Prompt):
+ * Build (x64 or ARM64 Native Tools / Developer Command Prompt):
  *   cl /W4 /nologo pqc_cert_harness.c /link crypt32.lib ncrypt.lib wintrust.lib
  *
  * Run:
@@ -46,8 +46,8 @@
 #include <ncrypt.h>
 #include <wintrust.h>
 #include <softpub.h>
-#include <stdio.h>
-#include <string.h>
+#include <cstdio>
+#include <cstring>
 
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "ncrypt.lib")
@@ -74,6 +74,9 @@
 #define szOID_MLDSA_65 "2.16.840.1.101.3.4.3.18"
 #define szOID_MLDSA_87 "2.16.840.1.101.3.4.3.19"
 
+/* ECDSA with SHA-256 signature OID */
+#define szOID_ECDSA_SHA256 "1.2.840.10045.4.3.2"
+
  /* Cert trust provider action GUID used with WTD_CHOICE_CERT
   * (softpub.h: CERT_CERTIFICATE_ACTION_VERIFY). Defined locally for portability. */
 static const GUID GUID_CERT_VERIFY =
@@ -81,14 +84,14 @@ static const GUID GUID_CERT_VERIFY =
 
 /* ------------------------------------------------------------------------- */
 
-static void print_err(const char* what, DWORD code)
+static void PrintErr(const char* what, DWORD code)
 {
-    LPSTR msg = NULL;
+    LPSTR msg = nullptr;
     DWORD n = FormatMessageA(
         FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-        FORMAT_MESSAGE_IGNORE_INSERTS, NULL, code,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&msg, 0, NULL);
-    fprintf(stderr, "    %-34s 0x%08lX %s%s",
+        FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, code,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&msg, 0, nullptr);
+    std::fprintf(stderr, "    %-34s 0x%08lX %s%s",
         what, code, (n && msg) ? msg : "(no system text)",
         (n && msg) ? "" : "\n");
     if (msg) LocalFree(msg);
@@ -97,65 +100,69 @@ static void print_err(const char* what, DWORD code)
 /*
  * Create a self-signed cert from a freshly generated CNG (KSP) key.
  *
- *   pszAlgId    : NCRYPT_RSA_ALGORITHM or BCRYPT_MLDSA_ALGORITHM
- *   dwRsaBits   : RSA modulus size (ignored when pszParamSet != NULL)
- *   pszParamSet : ML-DSA parameter set string, or NULL for RSA
+ *   pszAlgId    : NCRYPT_RSA_ALGORITHM, NCRYPT_ECDSA_ALGORITHM, or BCRYPT_MLDSA_ALGORITHM
+ *   dwRsaBits   : RSA modulus size (ignored when pszParamSet != nullptr or ECDSA)
+ *   pszParamSet : ML-DSA parameter set string or ECDSA curve name, or nullptr for RSA
  *   pszSigOid   : signature algorithm OID to stamp into the cert
  *   pwszSubject : X.500 subject DN, e.g. L"CN=Test,O=Lab"
  *
- * Uses an ephemeral key (NULL key name) plus CERT_CREATE_SELFSIGN_NO_KEY_INFO,
+ * Uses an ephemeral key (nullptr key name) plus CERT_CREATE_SELFSIGN_NO_KEY_INFO,
  * so nothing is persisted to the key store and there is nothing to clean up:
  * verification needs only the public cert.
  */
-static PCCERT_CONTEXT create_self_signed(
+static PCCERT_CONTEXT CreateSelfSigned(
     LPCWSTR pszAlgId, DWORD dwRsaBits, LPCWSTR pszParamSet,
     LPCSTR pszSigOid, LPCWSTR pwszSubject)
 {
-    SECURITY_STATUS    ss;
+    SECURITY_STATUS    ss = ERROR_SUCCESS;
     NCRYPT_PROV_HANDLE hProv = 0;
     NCRYPT_KEY_HANDLE  hKey = 0;
-    PCCERT_CONTEXT     pCert = NULL;
-    BYTE               nameBuf[1024];
+    PCCERT_CONTEXT     pCert = nullptr;
+    BYTE               nameBuf[1024]{};
     DWORD              nameLen = sizeof(nameBuf);
-    CERT_NAME_BLOB     subject = { 0 };
-    CRYPT_ALGORITHM_IDENTIFIER sigAlg = { 0 };
+    CERT_NAME_BLOB     subject{};
+    CRYPT_ALGORITHM_IDENTIFIER sigAlg{};
 
     ss = NCryptOpenStorageProvider(&hProv, MS_KEY_STORAGE_PROVIDER, 0);
-    if (FAILED(ss)) { print_err("NCryptOpenStorageProvider", ss); goto done; }
+    if (FAILED(ss)) { PrintErr("NCryptOpenStorageProvider", ss); goto done; }
 
-    /* NULL key name => ephemeral key, not persisted. */
-    ss = NCryptCreatePersistedKey(hProv, &hKey, pszAlgId, NULL, 0, 0);
-    if (FAILED(ss)) { print_err("NCryptCreatePersistedKey", ss); goto done; }
+    /* nullptr key name => ephemeral key, not persisted. */
+    ss = NCryptCreatePersistedKey(hProv, &hKey, pszAlgId, nullptr, 0, 0);
+    if (FAILED(ss)) { PrintErr("NCryptCreatePersistedKey", ss); goto done; }
 
     if (pszParamSet) {
+        /* For ML-DSA: set parameter set. For ECDSA: set curve name. */
+        LPCWSTR propName = (wcscmp(pszAlgId, NCRYPT_ECDSA_ALGORITHM) == 0)
+            ? NCRYPT_ECC_CURVE_NAME_PROPERTY
+            : BCRYPT_PARAMETER_SET_NAME;
         DWORD cb = (DWORD)((wcslen(pszParamSet) + 1) * sizeof(WCHAR));
-        ss = NCryptSetProperty(hKey, BCRYPT_PARAMETER_SET_NAME,
-            (PBYTE)pszParamSet, cb, 0);
-        if (FAILED(ss)) { print_err("NCryptSetProperty(ParameterSet)", ss); goto done; }
+        ss = NCryptSetProperty(hKey, propName, (PBYTE)pszParamSet, cb, 0);
+        if (FAILED(ss)) { PrintErr("NCryptSetProperty(ParameterSet/Curve)", ss); goto done; }
     }
     else {
+        /* RSA: set key length */
         ss = NCryptSetProperty(hKey, NCRYPT_LENGTH_PROPERTY,
             (PBYTE)&dwRsaBits, sizeof(dwRsaBits), 0);
-        if (FAILED(ss)) { print_err("NCryptSetProperty(Length)", ss); goto done; }
+        if (FAILED(ss)) { PrintErr("NCryptSetProperty(Length)", ss); goto done; }
     }
 
     ss = NCryptFinalizeKey(hKey, 0);
-    if (FAILED(ss)) { print_err("NCryptFinalizeKey", ss); goto done; }
+    if (FAILED(ss)) { PrintErr("NCryptFinalizeKey", ss); goto done; }
 
     if (!CertStrToNameW(X509_ASN_ENCODING, pwszSubject, CERT_X500_NAME_STR,
-        NULL, nameBuf, &nameLen, NULL)) {
-        print_err("CertStrToName", GetLastError()); goto done;
+        nullptr, nameBuf, &nameLen, nullptr)) {
+        PrintErr("CertStrToName", GetLastError()); goto done;
     }
     subject.pbData = nameBuf;
     subject.cbData = nameLen;
 
     sigAlg.pszObjId = (LPSTR)pszSigOid;   /* parameters left absent */
 
-    /* NULL start/end => now .. now + 1 year. */
+    /* nullptr start/end => now .. now + 1 year. */
     pCert = CertCreateSelfSignCertificate(
         hKey, &subject, CERT_CREATE_SELFSIGN_NO_KEY_INFO,
-        NULL, &sigAlg, NULL, NULL, NULL);
-    if (!pCert) print_err("CertCreateSelfSignCertificate", GetLastError());
+        nullptr, &sigAlg, nullptr, nullptr, nullptr);
+    if (!pCert) PrintErr("CertCreateSelfSignCertificate", GetLastError());
 
 done:
     if (hKey)  NCryptFreeObject(hKey);
@@ -163,101 +170,113 @@ done:
     return pCert;
 }
 
-static void dump_cert(PCCERT_CONTEXT pCert)
+static void DumpCert(PCCERT_CONTEXT pCert)
 {
-    char name[256] = { 0 };
+    char name[256]{};
     CertNameToStrA(X509_ASN_ENCODING, &pCert->pCertInfo->Subject,
         CERT_X500_NAME_STR, name, sizeof(name));
-    printf("    subject            : %s\n", name);
-    printf("    signature alg OID  : %s\n",
+    std::printf("    subject            : %s\n", name);
+    std::printf("    signature alg OID  : %s\n",
         pCert->pCertInfo->SignatureAlgorithm.pszObjId);
-    printf("    public key alg OID : %s\n",
-        pCert->pCertInfo->SubjectPublicKeyInfo.Algorithm.pszObjId);
-    printf("    public key bytes   : %lu\n",
-        pCert->pCertInfo->SubjectPublicKeyInfo.PublicKey.cbData);
-    printf("    encoded cert bytes : %lu\n", pCert->cbCertEncoded);
 }
 
 /*
- * Write the certificate to "<base>.der" (raw DER) and "<base>.pem" (base64 with
- * -----BEGIN CERTIFICATE----- header). Inspect with, e.g.:
+ * Write the certificate to "<base>.der" (raw DER). Inspect with, e.g.:
  *   certutil -dump <base>.der          (Windows)
  *   certutil -asn  <base>.der          (raw ASN.1 tree)
- *   openssl x509 -in <base>.pem -text -noout
  * The .der also opens directly in the Windows certificate viewer.
  */
-static BOOL write_cert_files(PCCERT_CONTEXT pCert, const char* base)
+static BOOL WriteCertFiles(PCCERT_CONTEXT pCert, const char* base)
 {
-    char   path[MAX_PATH];
+    char   path[MAX_PATH]{};
     BOOL   ok = FALSE;
     DWORD  written = 0;
-    HANDLE h;
-    LPSTR  pem = NULL;
-    DWORD  pemChars = 0;
+    HANDLE h = INVALID_HANDLE_VALUE;
 
     /* DER: the raw encoded certificate bytes. */
-    sprintf(path, "%s.der", base);
-    h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) { print_err("CreateFile(.der)", GetLastError()); goto done; }
-    if (!WriteFile(h, pCert->pbCertEncoded, pCert->cbCertEncoded, &written, NULL) ||
+    std::sprintf(path, "%s.der", base);
+    h = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { PrintErr("CreateFile(.der)", GetLastError()); goto done; }
+    if (!WriteFile(h, pCert->pbCertEncoded, pCert->cbCertEncoded, &written, nullptr) ||
         written != pCert->cbCertEncoded) {
-        print_err("WriteFile(.der)", GetLastError()); CloseHandle(h); goto done;
+        PrintErr("WriteFile(.der)", GetLastError()); CloseHandle(h); goto done;
     }
     CloseHandle(h);
-    printf("    wrote              : %s (%lu bytes, DER)\n", path, pCert->cbCertEncoded);
-
-    /* PEM: base64 of the same DER, wrapped with BEGIN/END CERTIFICATE. */
-    if (!CryptBinaryToStringA(pCert->pbCertEncoded, pCert->cbCertEncoded,
-        CRYPT_STRING_BASE64HEADER, NULL, &pemChars)) {
-        print_err("CryptBinaryToStringA(size)", GetLastError()); goto done;
-    }
-    pem = (LPSTR)LocalAlloc(LMEM_FIXED, pemChars);
-    if (!pem) { print_err("LocalAlloc(pem)", GetLastError()); goto done; }
-    if (!CryptBinaryToStringA(pCert->pbCertEncoded, pCert->cbCertEncoded,
-        CRYPT_STRING_BASE64HEADER, pem, &pemChars)) {
-        print_err("CryptBinaryToStringA", GetLastError()); goto done;
-    }
-
-    sprintf(path, "%s.pem", base);
-    h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) { print_err("CreateFile(.pem)", GetLastError()); goto done; }
-    if (!WriteFile(h, pem, (DWORD)strlen(pem), &written, NULL)) {
-        print_err("WriteFile(.pem)", GetLastError()); CloseHandle(h); goto done;
-    }
-    CloseHandle(h);
-    printf("    wrote              : %s (PEM)\n", path);
     ok = TRUE;
 
 done:
-    if (pem) LocalFree(pem);
     return ok;
 }
 
-static const char* wvt_text(LONG s)
+static const char* ChainErrorText(DWORD dwErrorStatus)
+{
+    if (dwErrorStatus == CERT_TRUST_NO_ERROR)
+        return "no error";
+    if (dwErrorStatus & CERT_TRUST_IS_NOT_TIME_VALID)
+        return "certificate or issuer expired/not yet valid";
+    if (dwErrorStatus & CERT_TRUST_IS_NOT_TIME_NESTED)
+        return "validity period nesting incorrect";
+    if (dwErrorStatus & CERT_TRUST_IS_REVOKED)
+        return "certificate revoked";
+    if (dwErrorStatus & CERT_TRUST_IS_NOT_SIGNATURE_VALID)
+        return "signature invalid";
+    if (dwErrorStatus & CERT_TRUST_IS_NOT_VALID_FOR_USAGE)
+        return "certificate not valid for requested usage";
+    if (dwErrorStatus & CERT_TRUST_IS_UNTRUSTED_ROOT)
+        return "root certificate not trusted";
+    if (dwErrorStatus & CERT_TRUST_REVOCATION_STATUS_UNKNOWN)
+        return "revocation status unknown";
+    if (dwErrorStatus & CERT_TRUST_IS_CYCLIC)
+        return "cyclic chain detected";
+    if (dwErrorStatus & CERT_TRUST_INVALID_EXTENSION)
+        return "invalid extension";
+    if (dwErrorStatus & CERT_TRUST_INVALID_POLICY_CONSTRAINTS)
+        return "invalid policy constraints";
+    if (dwErrorStatus & CERT_TRUST_INVALID_BASIC_CONSTRAINTS)
+        return "invalid basic constraints";
+    if (dwErrorStatus & CERT_TRUST_INVALID_NAME_CONSTRAINTS)
+        return "invalid name constraints";
+    if (dwErrorStatus & CERT_TRUST_HAS_NOT_SUPPORTED_NAME_CONSTRAINT)
+        return "unsupported name constraint";
+    if (dwErrorStatus & CERT_TRUST_HAS_NOT_DEFINED_NAME_CONSTRAINT)
+        return "undefined name constraint";
+    if (dwErrorStatus & CERT_TRUST_HAS_NOT_PERMITTED_NAME_CONSTRAINT)
+        return "not permitted name constraint";
+    if (dwErrorStatus & CERT_TRUST_HAS_EXCLUDED_NAME_CONSTRAINT)
+        return "excluded name constraint";
+    if (dwErrorStatus & CERT_TRUST_IS_PARTIAL_CHAIN)
+        return "partial chain";
+    if (dwErrorStatus & CERT_TRUST_CTL_IS_NOT_TIME_VALID)
+        return "CTL expired/not yet valid";
+    if (dwErrorStatus & CERT_TRUST_CTL_IS_NOT_SIGNATURE_VALID)
+        return "CTL signature invalid";
+    if (dwErrorStatus & CERT_TRUST_CTL_IS_NOT_VALID_FOR_USAGE)
+        return "CTL not valid for usage";
+    return "see error code above";
+}
+
+static const char* WvtText(LONG s)
 {
     switch ((DWORD)s) {
-    case 0:                                  return "trusted";
-    case (DWORD)CERT_E_UNTRUSTEDROOT:        return "untrusted root (expected: self-signed, not in Root store)";
-    case (DWORD)CERT_E_EXPIRED:              return "expired";
-    case (DWORD)CERT_E_CHAINING:             return "chaining error";
-    case (DWORD)TRUST_E_SUBJECT_NOT_TRUSTED: return "subject not trusted";
-    case (DWORD)TRUST_E_NOSIGNATURE:         return "no/invalid signature";
-    default:                                 return "see HRESULT above";
+        case 0:                                  return "trusted";
+        case (DWORD)CERT_E_UNTRUSTEDROOT:        return "untrusted root (expected: self-signed, not in Root store)";
+        case (DWORD)CERT_E_EXPIRED:              return "expired";
+        case (DWORD)CERT_E_CHAINING:             return "chaining error";
+        case (DWORD)TRUST_E_SUBJECT_NOT_TRUSTED: return "subject not trusted";
+        case (DWORD)TRUST_E_NOSIGNATURE:         return "no/invalid signature";
+        default:                                 return "see HRESULT above";
     }
 }
 
 /* Verify a raw cert through WinVerifyTrust's certificate trust provider. */
-static LONG verify_winverifytrust(PCCERT_CONTEXT pCert)
+static LONG CheckWinVerifyTrust(PCCERT_CONTEXT pCert)
 {
-    WINTRUST_CERT_INFO ci = { 0 };
-    WINTRUST_DATA      wd = { 0 };
-    GUID action = GUID_CERT_VERIFY;
-
+    WINTRUST_CERT_INFO ci{};
     ci.cbStruct = sizeof(ci);
     ci.psCertContext = (PCERT_CONTEXT)pCert;
 
+    WINTRUST_DATA wd{};
     wd.cbStruct = sizeof(wd);
     wd.dwUIChoice = WTD_UI_NONE;
     wd.fdwRevocationChecks = WTD_REVOKE_NONE;
@@ -265,6 +284,7 @@ static LONG verify_winverifytrust(PCCERT_CONTEXT pCert)
     wd.pCert = &ci;
     wd.dwStateAction = WTD_STATEACTION_IGNORE;
 
+    GUID action = GUID_CERT_VERIFY;
     return WinVerifyTrust((HWND)INVALID_HANDLE_VALUE, &action, &wd);
 }
 
@@ -273,44 +293,46 @@ static LONG verify_winverifytrust(PCCERT_CONTEXT pCert)
  * base policy. This verifies the self-signature (RSA or ML-DSA) without
  * modifying any machine trust store.
  */
-static BOOL verify_self_anchored(PCCERT_CONTEXT pCert)
+static BOOL VerifySelfAnchored(PCCERT_CONTEXT pCert)
 {
     BOOL                     ok = FALSE;
-    HCERTSTORE               hRoot = NULL;
-    HCERTCHAINENGINE         hEngine = NULL;
-    PCCERT_CHAIN_CONTEXT     pChain = NULL;
-    CERT_CHAIN_ENGINE_CONFIG cfg = { 0 };
-    CERT_CHAIN_PARA          para = { 0 };
-    CERT_CHAIN_POLICY_PARA   polPara = { 0 };
-    CERT_CHAIN_POLICY_STATUS polStat = { 0 };
+    HCERTSTORE               hRoot = nullptr;
+    HCERTCHAINENGINE         hEngine = nullptr;
+    PCCERT_CHAIN_CONTEXT     pChain = nullptr;
+    CERT_CHAIN_ENGINE_CONFIG cfg{};
+    CERT_CHAIN_PARA          para{};
+    CERT_CHAIN_POLICY_PARA   polPara{};
+    CERT_CHAIN_POLICY_STATUS polStat{};
 
-    hRoot = CertOpenStore(CERT_STORE_PROV_MEMORY, X509_ASN_ENCODING, 0, 0, NULL);
-    if (!hRoot) { print_err("CertOpenStore", GetLastError()); goto done; }
+    hRoot = CertOpenStore(CERT_STORE_PROV_MEMORY, X509_ASN_ENCODING, 0, 0, nullptr);
+    if (!hRoot) { PrintErr("CertOpenStore", GetLastError()); goto done; }
 
     if (!CertAddCertificateContextToStore(hRoot, pCert,
-        CERT_STORE_ADD_ALWAYS, NULL)) {
-        print_err("CertAddCertificateContextToStore", GetLastError()); goto done;
+        CERT_STORE_ADD_ALWAYS, nullptr)) {
+        PrintErr("CertAddCertificateContextToStore", GetLastError()); goto done;
     }
 
     cfg.cbSize = sizeof(cfg);
     cfg.hExclusiveRoot = hRoot;   /* the only trusted root is our own cert */
     if (!CertCreateCertificateChainEngine(&cfg, &hEngine)) {
-        print_err("CertCreateCertificateChainEngine", GetLastError()); goto done;
+        PrintErr("CertCreateCertificateChainEngine", GetLastError()); goto done;
     }
 
     para.cbSize = sizeof(para);
-    if (!CertGetCertificateChain(hEngine, pCert, NULL, NULL, &para,
-        0, NULL, &pChain)) {
-        print_err("CertGetCertificateChain", GetLastError()); goto done;
+    if (!CertGetCertificateChain(hEngine, pCert, nullptr, nullptr, &para,
+        0, nullptr, &pChain)) {
+        PrintErr("CertGetCertificateChain", GetLastError()); goto done;
     }
 
-    printf("    chain error status : 0x%08lX\n", pChain->TrustStatus.dwErrorStatus);
+    std::printf("    chain error status : 0x%08lX (%s)\n", 
+        pChain->TrustStatus.dwErrorStatus, 
+        ChainErrorText(pChain->TrustStatus.dwErrorStatus));
 
     polPara.cbSize = sizeof(polPara);
     polStat.cbSize = sizeof(polStat);
     if (!CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_BASE, pChain,
         &polPara, &polStat)) {
-        print_err("CertVerifyCertificateChainPolicy", GetLastError()); goto done;
+        PrintErr("CertVerifyCertificateChainPolicy", GetLastError()); goto done;
     }
 
     if (polStat.dwError == 0 &&
@@ -318,7 +340,7 @@ static BOOL verify_self_anchored(PCCERT_CONTEXT pCert)
         ok = TRUE;
     }
     else {
-        printf("    base policy error  : 0x%08lX\n", polStat.dwError);
+        std::printf("    base policy error  : 0x%08lX\n", polStat.dwError);
     }
 
 done:
@@ -328,37 +350,32 @@ done:
     return ok;
 }
 
-static int run_test(const char* label, const char* fileBase,
+static int RunTest(const char* label, const char* fileBase,
     LPCWSTR alg, DWORD rsaBits,
     LPCWSTR paramSet, LPCSTR sigOid, LPCWSTR subject)
 {
-    int pass;
-    LONG wvt;
-    BOOL anchored;
-    PCCERT_CONTEXT pCert;
+    std::printf("== %s ==\n", label);
 
-    printf("== %s ==\n", label);
-
-    pCert = create_self_signed(alg, rsaBits, paramSet, sigOid, subject);
+    auto pCert = CreateSelfSigned(alg, rsaBits, paramSet, sigOid, subject);
     if (!pCert) {
-        printf("    RESULT: FAIL (certificate not created)\n\n");
+        std::printf("    RESULT: FAIL (certificate not created)\n\n");
         return 1;
     }
-    dump_cert(pCert);
-    write_cert_files(pCert, fileBase);
+    DumpCert(pCert);
+    WriteCertFiles(pCert, fileBase);
 
-    wvt = verify_winverifytrust(pCert);
-    printf("    WinVerifyTrust     : 0x%08lX (%s)\n", (DWORD)wvt, wvt_text(wvt));
+    LONG wvt = CheckWinVerifyTrust(pCert);
+    std::printf("    WinVerifyTrust     : 0x%08lX (%s)\n", (DWORD)wvt, WvtText(wvt));
 
-    anchored = verify_self_anchored(pCert);
-    printf("    self-anchored chain: %s\n",
+    BOOL anchored = VerifySelfAnchored(pCert);
+    std::printf("    self-anchored chain: %s\n",
         anchored ? "VALID (self-signature verified)" : "INVALID");
 
     /* Pass: cert built, self-signature verifies under self-anchor, and WVT
      * reached a verdict (trusted, or untrusted-root as expected). */
-    pass = anchored &&
+    int pass = anchored &&
         (wvt == 0 || (DWORD)wvt == (DWORD)CERT_E_UNTRUSTEDROOT);
-    printf("    RESULT: %s\n\n", pass ? "PASS" : "FAIL");
+    std::printf("    RESULT: %s\n\n", pass ? "PASS" : "FAIL");
 
     CertFreeCertificateContext(pCert);
     return pass ? 0 : 1;
@@ -367,28 +384,32 @@ static int run_test(const char* label, const char* fileBase,
 int main(int argc, char** argv)
 {
     const char* want = (argc > 1) ? argv[1] : "65";
-    LPCWSTR pset;
-    LPCSTR  poid;
-    char mldsaBase[64];
+    LPCWSTR pset = nullptr;
+    LPCSTR  poid = nullptr;
+    char mldsaBase[64]{};
     int rc = 0;
 
-    if (!strcmp(want, "44")) { pset = BCRYPT_MLDSA_PARAMETER_SET_44; poid = szOID_MLDSA_44; }
-    else if (!strcmp(want, "87")) { pset = BCRYPT_MLDSA_PARAMETER_SET_87; poid = szOID_MLDSA_87; }
+    if (!std::strcmp(want, "44")) { pset = BCRYPT_MLDSA_PARAMETER_SET_44; poid = szOID_MLDSA_44; }
+    else if (!std::strcmp(want, "87")) { pset = BCRYPT_MLDSA_PARAMETER_SET_87; poid = szOID_MLDSA_87; }
     else { pset = BCRYPT_MLDSA_PARAMETER_SET_65; poid = szOID_MLDSA_65; want = "65"; }
 
-    sprintf(mldsaBase, "mldsa%s_selfsigned", want);
+    std::sprintf(mldsaBase, "mldsa%s_selfsigned", want);
 
-    printf("Self-signed certificate validation harness (built %s)\n", __DATE__);
-    printf("ML-DSA parameter set: ML-DSA-%s\n\n", want);
+    std::printf("Self-signed certificate validation harness (built %s)\n", __DATE__);
+    std::printf("ML-DSA parameter set: ML-DSA-%s\n\n", want);
 
-    rc |= run_test("RSA-3072 / SHA-256", "rsa3072_selfsigned",
-        NCRYPT_RSA_ALGORITHM, 3072, NULL,
+    rc |= RunTest("RSA-3072 / SHA-256", "rsa3072_selfsigned",
+        NCRYPT_RSA_ALGORITHM, 3072, nullptr,
         szOID_RSA_SHA256RSA, L"CN=RSA Self-Signed Test,O=Harness");
 
-    rc |= run_test("ML-DSA (pure)", mldsaBase,
+    rc |= RunTest("ECDSA-P256 / SHA-256", "ecdsap256_selfsigned",
+        NCRYPT_ECDSA_ALGORITHM, 0, BCRYPT_ECC_CURVE_NISTP256,
+        szOID_ECDSA_SHA256, L"CN=ECDSA Self-Signed Test,O=Harness");
+
+    rc |= RunTest("ML-DSA (pure)", mldsaBase,
         BCRYPT_MLDSA_ALGORITHM, 0, pset,
         poid, L"CN=ML-DSA Self-Signed Test,O=Harness");
 
-    printf("Overall: %s\n", rc == 0 ? "ALL TESTS PASSED" : "ONE OR MORE TESTS FAILED");
+    std::printf("Overall: %s\n", rc == 0 ? "ALL TESTS PASSED" : "ONE OR MORE TESTS FAILED");
     return rc;
 }
