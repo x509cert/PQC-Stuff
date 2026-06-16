@@ -1,14 +1,15 @@
-# WinVerifyTrust() pqc-cert-harness
+# WinVerifyTrust - PQC Certificate Harness
 
-A small Windows test harness in C that generates self-signed **RSA** and
+A Windows test harness in modern C++ that generates self-signed **RSA**, **ECDSA**, and
 **ML-DSA** (FIPS 204) certificates and validates each one two ways:
 through **WinVerifyTrust** and through a **self-anchored certificate chain
-build**. It also writes every certificate to disk as DER and PEM so you can
-inspect the encoding.
+build**. It also writes every certificate to disk as DER for inspection.
 
 It's meant as a minimal, readable reference for exercising post-quantum
 certificate support on the modern Windows crypto stack (CNG / wincrypt),
-alongside the classical RSA path for comparison.
+alongside classical signature algorithms (RSA, ECDSA) for comparison. The codebase uses modern C++
+constructs including nullptr, brace initialization, auto, inline declarations,
+and PascalCase function naming.
 
 ## What it does
 
@@ -16,10 +17,10 @@ For each algorithm the harness:
 
 1. Generates a key with a CNG Key Storage Provider (ephemeral, not persisted).
 2. Builds a self-signed certificate with `CertCreateSelfSignCertificate`.
-3. Validates the raw certificate with `WinVerifyTrust` (`WTD_CHOICE_CERT`).
+3. Validates the raw certificate with `WinVerifyTrust` (`WTD_CHOICE_CERT`) via `CheckWinVerifyTrust()`.
 4. Verifies the self-signature with a private chain engine that trusts only
-   the certificate itself as its root (`hExclusiveRoot`).
-5. Writes `<name>.der` and `<name>.pem`.
+   the certificate itself as its root (`hExclusiveRoot`) via `VerifySelfAnchored()`.
+5. Writes `<name>.der` (DER format only).
 
 ### Why two validators
 
@@ -42,7 +43,7 @@ the expected untrusted-root verdict.
 | OS (ML-DSA path) | Windows 11 24H2 **or** Windows Server 2025, with the **November 2025 update** or later. ML-DSA in CNG/wincrypt went GA in that update. |
 | OS (RSA path) | Any current Windows. |
 | SDK | Windows SDK **10.0.26100** or later, for the `BCRYPT_MLDSA_*` symbols. |
-| Compiler | MSVC (`cl`) from Visual Studio or the Build Tools. |
+| Compiler | MSVC (`cl`) from Visual Studio 2019 or later (C++17 support required for modern constructs). |
 
 Fallback `#define`s for the ML-DSA constants are included so the code still
 compiles on a slightly older SDK, but building against the real SDK macros is
@@ -50,17 +51,19 @@ strongly preferred — see [Troubleshooting](#troubleshooting).
 
 ## Build
 
-From an **x64 Native Tools Command Prompt** (or any Developer Command Prompt):
+From an **x64 Native Tools Command Prompt** (or any Developer Command Prompt) or Visual Studio:
 
 ```bat
-cl /W4 /nologo pqc_cert_harness.c /link crypt32.lib ncrypt.lib wintrust.lib
+cl /W4 /nologo /std:c++17 WinVerifyTrust.cpp /link crypt32.lib ncrypt.lib wintrust.lib
 ```
+
+Or open `WinVerifyTrust.vcxproj` in Visual Studio and build normally.
 
 ## Usage
 
 ```bat
-pqc_cert_harness.exe          :: RSA-3072 + ML-DSA-65 (default)
-pqc_cert_harness.exe 44       :: choose the ML-DSA parameter set: 44 | 65 | 87
+WinVerifyTrust.exe          :: RSA-3072 + ML-DSA-65 (default)
+WinVerifyTrust.exe 44       :: choose the ML-DSA parameter set: 44 | 65 | 87
 ```
 
 ### Example output
@@ -72,33 +75,29 @@ ML-DSA parameter set: ML-DSA-65
 == RSA-3072 / SHA-256 ==
     subject            : CN=RSA Self-Signed Test, O=Harness
     signature alg OID  : 1.2.840.113549.1.1.11
-    public key alg OID : 1.2.840.113549.1.1.1
-    public key bytes   : 398
-    encoded cert bytes : 712
-    wrote              : rsa3072_selfsigned.der (712 bytes, DER)
-    wrote              : rsa3072_selfsigned.pem (PEM)
     WinVerifyTrust     : 0x800B0109 (untrusted root (expected: self-signed, not in Root store))
-    chain error status : 0x00000000
+    chain error status : 0x00000000 (no error)
+    self-anchored chain: VALID (self-signature verified)
+    RESULT: PASS
+
+== ECDSA-P256 / SHA-256 ==
+    subject            : CN=ECDSA Self-Signed Test, O=Harness
+    signature alg OID  : 1.2.840.10045.4.3.2
+    WinVerifyTrust     : 0x800B0109 (untrusted root (expected: self-signed, not in Root store))
+    chain error status : 0x00000000 (no error)
     self-anchored chain: VALID (self-signature verified)
     RESULT: PASS
 
 == ML-DSA (pure) ==
     subject            : CN=ML-DSA Self-Signed Test, O=Harness
     signature alg OID  : 2.16.840.1.101.3.4.3.18
-    public key alg OID : 2.16.840.1.101.3.4.3.18
-    public key bytes   : 1952
-    encoded cert bytes : ...
-    wrote              : mldsa65_selfsigned.der (... bytes, DER)
-    wrote              : mldsa65_selfsigned.pem (PEM)
     WinVerifyTrust     : 0x800B0109 (untrusted root (expected: self-signed, not in Root store))
-    chain error status : 0x00000000
+    chain error status : 0x00000000 (no error)
     self-anchored chain: VALID (self-signature verified)
     RESULT: PASS
 
 Overall: ALL TESTS PASSED
 ```
-
-(Exact byte counts vary; the values above are illustrative.)
 
 ## Output files
 
@@ -106,8 +105,9 @@ Each run (over)writes, in the working directory:
 
 | File | Contents |
 |------|----------|
-| `rsa3072_selfsigned.der` / `.pem` | RSA-3072 / SHA-256 certificate |
-| `mldsa<set>_selfsigned.der` / `.pem` | ML-DSA certificate for the selected parameter set |
+| `rsa3072_selfsigned.der` | RSA-3072 / SHA-256 certificate (DER format) |
+| `ecdsap256_selfsigned.der` | ECDSA-P256 / SHA-256 certificate (DER format) |
+| `mldsa<set>_selfsigned.der` | ML-DSA certificate for the selected parameter set (DER format) |
 
 The certificates are public-only: keys are ephemeral and never written to
 disk, so the files are safe to share, commit, or diff. (No private key, no PFX.)
@@ -117,10 +117,6 @@ disk, so the files are safe to share, commit, or diff. (No private key, no PFX.)
 ```bat
 certutil -dump  mldsa65_selfsigned.der            :: human-readable summary
 certutil -asn   mldsa65_selfsigned.der            :: raw ASN.1 tree
-```
-
-```bash
-openssl x509 -in mldsa65_selfsigned.pem -text -noout
 ```
 
 The `.der` file also opens directly in the Windows certificate viewer on
@@ -136,7 +132,38 @@ A current `certutil` is the more reliable reader for PQC certificates; older
 `openssl` builds without ML-DSA OID tables parse the structure but print the
 algorithm as an unrecognized OID instead of a friendly name.
 
-## ML-DSA reference
+## Code Style
+
+The codebase uses modern C++ constructs compatible with C++17:
+
+- **nullptr** instead of `NULL` for pointer initialization
+- **Brace initialization** (`{}`) for zero-initialization of structs and arrays
+- **auto** keyword for type deduction where appropriate
+- **Inline variable declarations** closer to point of use
+- **std:: namespace** for C library functions (`std::printf`, `std::sprintf`, `std::strcmp`, `std::fprintf`)
+- **PascalCase function names** for consistency (e.g., `CreateSelfSigned()`, `CheckWinVerifyTrust()`)
+- **Explicit initialization** for safer defaults (e.g., `HANDLE h = INVALID_HANDLE_VALUE`)
+
+This makes the code more robust and easier to maintain while remaining compatible
+with Windows crypto APIs.
+
+## Algorithm Reference
+
+### ECDSA
+
+This harness tests **ECDSA-P256** (secp256r1 / prime256v1) with SHA-256:
+
+| Property | Value |
+|----------|-------|
+| Curve | NIST P-256 (secp256r1) |
+| Signature OID | `1.2.840.10045.4.3.2` (ecdsa-with-SHA256) |
+| Public key size | 65 bytes (uncompressed point) |
+| Security level | ~128-bit classical |
+
+ECDSA is widely supported across all modern Windows versions and provides
+efficient signatures with smaller key sizes compared to RSA.
+
+### ML-DSA
 
 NIST CSOR object identifiers (parameters omitted in the `AlgorithmIdentifier`):
 
@@ -161,18 +188,22 @@ legacy CSPs). This harness uses the pure variant.
 
 ## How it works (source layout)
 
-Everything lives in a single file, `pqc_cert_harness.c`:
+Everything lives in a single file, `WinVerifyTrust.cpp`:
 
-- `create_self_signed()` — KSP key generation + `CertCreateSelfSignCertificate`
-  (ephemeral key, `CERT_CREATE_SELFSIGN_NO_KEY_INFO`).
-- `write_cert_files()` — DER + PEM output (`CryptBinaryToStringA`).
-- `verify_winverifytrust()` — `WTD_CHOICE_CERT` path.
-- `verify_self_anchored()` — private chain engine with `hExclusiveRoot`.
-- `run_test()` / `main()` — drive both algorithms and summarize.
+- `CreateSelfSigned()` — KSP key generation + `CertCreateSelfSignCertificate`
+  (ephemeral key, `CERT_CREATE_SELFSIGN_NO_KEY_INFO`). Handles RSA, ECDSA, and ML-DSA.
+- `WriteCertFiles()` — DER output to disk.
+- `CheckWinVerifyTrust()` — `WTD_CHOICE_CERT` path for trust validation.
+- `VerifySelfAnchored()` — private chain engine with `hExclusiveRoot` for signature verification.
+- `DumpCert()` — display certificate subject and signature algorithm.
+- `RunTest()` / `main()` — drive all three algorithms and summarize results.
+- `PrintErr()` — formatted error output with system messages.
+- `ChainErrorText()` — translate certificate chain error status codes to readable text.
+- `WvtText()` — translate WinVerifyTrust return codes to readable text.
 
 ## License
 
-See LICENSE.MD
+Add your preferred license here (e.g. MIT).
 
 ## Disclaimer
 
